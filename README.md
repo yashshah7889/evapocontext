@@ -1,4 +1,4 @@
-# evapoContext™
+# evapoContext
 > **Hardware-Aware Stateful Context Router & Model Context Protocol (MCP) Gateway**
 
 `evapoContext` is an enterprise-grade, local background context router and Model Context Protocol (MCP) gateway. It prevents local Large Language Models (LLMs) from experiencing effective context window collapse and thermal throttling due to large JSON tool definitions ("Tools Tax") and chat history volumes.
@@ -115,10 +115,4 @@ Add `evapoContext` as an MCP server in Claude Desktop:
 }
 ```
 
----
 
-### Copyright & Trademark
-
-Copyright (c) 2026 yashs. All rights reserved.
-
-`evapoContext`™ and its related mechanics (Adaptive Hardware-Aware Retrieval Gating, Relativistic Gravitational Scoring, Systemic Flux Pinning) are trademarks of yashs.
