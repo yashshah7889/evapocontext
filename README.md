@@ -117,12 +117,6 @@ Add `evapoContext` as an MCP server in Claude Desktop:
 
 ---
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
 ### Copyright & Trademark
 
 Copyright (c) 2026 yashs. All rights reserved.

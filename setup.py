@@ -31,8 +31,7 @@ setup(
         "Operating System :: Microsoft :: Windows",
         "Operating System :: MacOS :: MacOS X",
         "Topic :: Software Development :: Libraries :: Application Frameworks",
-        "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License"
+        "Intended Audience :: Developers"
     ],
     entry_points={
         "console_scripts": [
