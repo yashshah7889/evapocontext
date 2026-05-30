@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and DBs
+*.db
+*.db-journal
+.cache/
+
+# Local models (automatically downloaded on demand)
+src/model/onnx/
+src/model/tokenizer.json
+
+# Specs and temporary developer scratchpads
+scratch/
+phases/
+*.docx
+*.txt
+benchmark_results.json
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# User settings and IDE configs
+.idea/
+.vscode/
+.antigravitycli/
+*.swp
+*.swo
