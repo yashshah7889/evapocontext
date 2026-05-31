@@ -27,8 +27,8 @@ def run_chaos_tests():
     store = HybridRetrievalStore(embedding_generator=embedder)
     engine = DynamicContextReRanker()
 
-        # Chaos Test 1: Nil / Empty Input Resiliency
-        print("\n--- Chaos Test 1: Empty and Nil Payloads ---")
+    # Chaos Test 1: Nil / Empty Input Resiliency
+    print("\n--- Chaos Test 1: Empty and Nil Payloads ---")
     
     # Query with empty query
     res_empty_q = store.retrieve("", top_k=5)
@@ -48,8 +48,8 @@ def run_chaos_tests():
     print("Corrupt/empty text chunks bypassed safely.")
     assert len(store.chunks) == 0, "No corrupt items should be indexed"
 
-        # Chaos Test 2: Invalid Categories & Weights
-        print("\n--- Chaos Test 2: Unregistered Categories & Custom Weights ---")
+    # Chaos Test 2: Invalid Categories & Weights
+    print("\n--- Chaos Test 2: Unregistered Categories & Custom Weights ---")
     
     valid_chunk = {
         "id": "valid_1",
@@ -70,8 +70,8 @@ def run_chaos_tests():
     # Clean store for next test
     store.clear()
 
-        # Chaos Test 3: Zero & Negative Ranks
-        print("\n--- Chaos Test 3: Division-by-Zero / Zero & Negative Ranks ---")
+    # Chaos Test 3: Zero & Negative Ranks
+    print("\n--- Chaos Test 3: Division-by-Zero / Zero & Negative Ranks ---")
     
     # Feeding zero, negative, or floats to calculate_force
     force_zero = engine.calculate_retention_score(similarity=0.8, token_count=100, rank=0)
@@ -85,8 +85,8 @@ def run_chaos_tests():
     assert force_zero > 0.0 and force_neg > 0.0, "Ranks below 1 should safely fallback to rank 1 properties"
     assert force_zero == force_neg, "Rank 0 and negative ranks should yield identical limits"
 
-        # Chaos Test 4: Giant Payloads & Split bounds
-        print("\n--- Chaos Test 4: Giant Payload Bounds ---")
+    # Chaos Test 4: Giant Payloads & Split bounds
+    print("\n--- Chaos Test 4: Giant Payload Bounds ---")
     
     # Large word segment to stress tokenizer and Splitter
     giant_text = "word " * 20000
@@ -102,8 +102,8 @@ def run_chaos_tests():
     # Clean store for thread stress test
     store.clear()
 
-        # Chaos Test 5: Concurrent Multithreaded Stress
-        print("\n--- Chaos Test 5: Concurrent Multi-Threaded Stress Querying ---")
+    # Chaos Test 5: Concurrent Multithreaded Stress
+    print("\n--- Chaos Test 5: Concurrent Multi-Threaded Stress Querying ---")
     
     # Fill database with 20 distinct records
     test_data = [

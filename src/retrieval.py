@@ -343,9 +343,18 @@ class HybridRetrievalStore:
                     pinning_level TEXT NOT NULL,
                     category TEXT NOT NULL,
                     embedding BLOB NOT NULL,
-                    metadata TEXT NOT NULL
+                    metadata TEXT NOT NULL,
+                    turn_index INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            
+            # Dynamic migration check to ensure backwards compatibility with existing database files
+            cursor.execute("PRAGMA table_info(chunks)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if "turn_index" not in columns:
+                logger.info("Migrating SQLite store to add 'turn_index' column...")
+                cursor.execute("ALTER TABLE chunks ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0")
+                
             conn.commit()
         finally:
             conn.close()
@@ -358,12 +367,12 @@ class HybridRetrievalStore:
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, text, token_count, is_pinned, pinning_level, category, embedding, metadata FROM chunks")
+            cursor.execute("SELECT id, text, token_count, is_pinned, pinning_level, category, embedding, metadata, turn_index FROM chunks")
             rows = cursor.fetchall()
             
             loaded_count = 0
             for row in rows:
-                chunk_id, text, token_count, is_pinned, pinning_level, category, emb_blob, meta_str = row
+                chunk_id, text, token_count, is_pinned, pinning_level, category, emb_blob, meta_str, turn_index = row
                 
                 embedding = np.frombuffer(emb_blob, dtype=np.float32)
                 metadata = json.loads(meta_str)
@@ -376,7 +385,8 @@ class HybridRetrievalStore:
                     "pinning_level": pinning_level,
                     "category": category,
                     "embedding": embedding,
-                    "metadata": metadata
+                    "metadata": metadata,
+                    "turn_index": turn_index
                 }
 
                 self.chunks.append(chunk_record)
@@ -394,7 +404,7 @@ class HybridRetrievalStore:
         self.exact_query_cache.clear()
         self.semantic_query_cache.clear()
 
-    def add_chunks(self, raw_chunks: List[Dict[str, Any]]):
+    def add_chunks(self, raw_chunks: List[Dict[str, Any]], turn_index: int = 0):
         """
         Inserts chunks into the index. Deduplicates insertions by checking if the chunk
         already exists with identical text, reusing cached embeddings to skip ONNX execution.
@@ -433,6 +443,9 @@ class HybridRetrievalStore:
             # Compute exact token count using the tokenizer
             encoded = self.embedding_generator.tokenizer.encode(text)
             token_count = len(encoded.ids)
+            
+            # Extract turn_index from chunk if present, otherwise default to the method parameter
+            item_turn = chunk.get("turn_index", turn_index)
 
             meta = {
                 "id": chunk_id,
@@ -442,7 +455,8 @@ class HybridRetrievalStore:
                 "pinning_level": pinning_level,
                 "category": category,
                 "metadata": metadata,
-                "embedding": None
+                "embedding": None,
+                "turn_index": item_turn
             }
 
             # Optimization Check: If text is already embedded, reuse the vector
@@ -470,8 +484,8 @@ class HybridRetrievalStore:
                 for meta in chunks_metadata:
                     cursor.execute("""
                         INSERT OR REPLACE INTO chunks 
-                        (id, text, token_count, is_pinned, pinning_level, category, embedding, metadata)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, text, token_count, is_pinned, pinning_level, category, embedding, metadata, turn_index)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         meta["id"],
                         meta["text"],
@@ -480,7 +494,8 @@ class HybridRetrievalStore:
                         meta["pinning_level"],
                         meta["category"],
                         meta["embedding"].tobytes(),
-                        json.dumps(meta["metadata"])
+                        json.dumps(meta["metadata"]),
+                        meta["turn_index"]
                     ))
                 conn.commit()
             finally:
@@ -521,17 +536,13 @@ class HybridRetrievalStore:
         bm25_candidates: int = 50,
         hybrid_weight: float = 0.3,
         category_weights: Optional[Dict[str, float]] = None,
-        system_pressure: float = 0.0
+        system_pressure: float = 0.0,
+        current_turn: int = 0
     ) -> List[Dict[str, Any]]:
         """
         Executes hybrid two-tiered search with category boosting and dual-layer caching.
         Integrates Adaptive Hardware-Aware Retrieval Gating (AHARG) to scale and bypass
         computation under resource strain.
-        
-        1. Exact Cache Check (lexical check, 0.001ms)
-        2. Vector Bypass Check (if system_pressure >= 0.90, bypass ONNX execution)
-        3. Semantic Cache Check (vector comparison, 0.05ms)
-        4. Dynamic Candidate Scaling & Standard Two-Tiered Recall (BM25 + Cosine Re-ranking)
         """
         weights = category_weights if category_weights is not None else DEFAULT_CATEGORY_WEIGHTS
         weights_tuple = tuple(sorted(weights.items()))
@@ -539,7 +550,7 @@ class HybridRetrievalStore:
         
         # Round system pressure to 1 decimal place to prevent caching wiggles
         pressure_bucket = round(system_pressure, 1)
-        cache_key = (query_cleaned, top_k, bm25_candidates, hybrid_weight, weights_tuple, pressure_bucket)
+        cache_key = (query_cleaned, top_k, bm25_candidates, hybrid_weight, weights_tuple, pressure_bucket, current_turn)
 
         # --- OPTIMIZATION 1: EXACT CACHE CHECK ---
         with self.lock:
@@ -584,6 +595,16 @@ class HybridRetrievalStore:
                         chunk["similarity"] = round(boosted_score, 6)
                         chunk["vector_bypass_active"] = True
                         chunk.pop("embedding", None)
+                        
+                        # Calculate turn-based chronological decay offset based on segment policy
+                        if category in ("system_rule", "tool_schema", "memory"):
+                            turn_offset = 0
+                        elif category == "tool_output":
+                            turn_offset = max(0, current_turn - chunk.get("turn_index", 0)) * 2
+                        else:
+                            turn_offset = max(0, current_turn - chunk.get("turn_index", 0))
+                        chunk["turn_offset"] = turn_offset
+                        
                         candidate_records.append(chunk)
                         
             candidate_records.sort(key=lambda x: x["similarity"], reverse=True)
@@ -610,6 +631,7 @@ class HybridRetrievalStore:
                     and abs(cached["hybrid_weight"] - hybrid_weight) < 1e-6
                     and cached["weights_tuple"] == weights_tuple
                     and cached.get("pressure_bucket", 0.0) == pressure_bucket
+                    and cached.get("current_turn", 0) == current_turn
                 ):
                     sim = float(np.dot(cached["embedding"], query_embedding))
                     if sim > best_semantic_sim:
@@ -650,6 +672,17 @@ class HybridRetrievalStore:
                 if chunk_id in chunk_by_id:
                     chunk = chunk_by_id[chunk_id].copy()
                     chunk["bm25_score"] = score
+                    
+                    # Calculate turn-based chronological decay offset based on segment policy
+                    category = chunk.get("category", "conversation")
+                    if category in ("system_rule", "tool_schema", "memory"):
+                        turn_offset = 0
+                    elif category == "tool_output":
+                        turn_offset = max(0, current_turn - chunk.get("turn_index", 0)) * 2
+                    else:
+                        turn_offset = max(0, current_turn - chunk.get("turn_index", 0))
+                    chunk["turn_offset"] = turn_offset
+                    
                     candidate_records.append(chunk)
                     candidate_embeddings.append(chunk["embedding"])
                     if score > max_bm25_score:
@@ -702,6 +735,7 @@ class HybridRetrievalStore:
                 "hybrid_weight": hybrid_weight,
                 "weights_tuple": weights_tuple,
                 "pressure_bucket": pressure_bucket,
+                "current_turn": current_turn,
                 "results": candidate_records
             })
 

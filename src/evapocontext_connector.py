@@ -46,6 +46,9 @@ class EvapoContextConnector:
         # 3. Setup Dynamic Context Re-Ranker
         self.engine = DynamicContextReRanker()
         
+        # Session state turn counter for turn-based chronological decay
+        self.current_turn = 0
+        
         logger.info(f"EvapoContext Connector loaded successfully. DB Path: {self.db_path}")
 
     def add_document(
@@ -69,9 +72,10 @@ class EvapoContextConnector:
             "text": text,
             "category": category,
             "is_pinned": is_pinned,
-            "pinning_level": "critical" if is_pinned else "none"
+            "pinning_level": "critical" if is_pinned else "none",
+            "turn_index": self.current_turn
         }
-        self.store.add_chunks([chunk])
+        self.store.add_chunks([chunk], turn_index=self.current_turn)
         logger.info(f"Document '{doc_id}' indexed successfully under category '{category}'.")
 
     def add_documents_batch(self, chunks: List[Dict[str, Any]]):
@@ -91,9 +95,10 @@ class EvapoContextConnector:
                 "category": c.get("category", "conversation"),
                 "is_pinned": is_pinned,
                 "pinning_level": c.get("pinning_level", "critical" if is_pinned else "none"),
-                "metadata": c.get("metadata", {})
+                "metadata": c.get("metadata", {}),
+                "turn_index": c.get("turn_index", self.current_turn)
             })
-        self.store.add_chunks(processed_chunks)
+        self.store.add_chunks(processed_chunks, turn_index=self.current_turn)
         logger.info(f"Indexed batch of {len(processed_chunks)} documents successfully.")
 
     def search_and_optimize(
@@ -119,17 +124,19 @@ class EvapoContextConnector:
               - 'survived_chunks': Detailed records of chunks that passed eviction boundaries.
               - 'telemetry': Memory and CPU utilization diagnostic details.
         """
-                pressure = self.telemetry.get_pressure()
+        self.current_turn += 1
+        pressure = self.telemetry.get_pressure()
 
-                candidates = self.store.retrieve(
+        candidates = self.store.retrieve(
             query=query,
             top_k=top_k,
             category_weights=category_weights,
-            system_pressure=pressure
+            system_pressure=pressure,
+            current_turn=self.current_turn
         )
 
-                for idx, c in enumerate(candidates):
-                    c["rank"] = idx + 1
+        for idx, c in enumerate(candidates):
+            c["rank"] = idx + 1
 
         optimized_chunks = self.engine.optimize_context(
             chunks=candidates,

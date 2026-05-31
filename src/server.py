@@ -93,6 +93,7 @@ class EvapoContextDaemon:
     def __init__(self, telemetry_monitor: HardwareTelemetryMonitor):
         self.telemetry = telemetry_monitor
         self.engine = DynamicContextReRanker()
+        self.current_turn = 0
         
         # Configure model paths relative to server file location
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -258,10 +259,11 @@ class EvapoContextDaemon:
                 "category": c.get("category", "conversation"),
                 "is_pinned": c.get("is_pinned", False),
                 "pinning_level": c.get("pinning_level", "critical" if c.get("is_pinned") else "none"),
-                "metadata": c.get("metadata", {})
+                "metadata": c.get("metadata", {}),
+                "turn_index": c.get("turn_index", self.current_turn)
             })
             
-        self.store.add_chunks(processed)
+        self.store.add_chunks(processed, turn_index=self.current_turn)
         response_text = f"Successfully indexed {len(processed)} chunks in persistent database."
         
         return {
@@ -278,6 +280,9 @@ class EvapoContextDaemon:
         hybrid_weight = args.get("hybrid_weight", 0.3)
         token_budget = args.get("token_budget")
 
+        # Increment current turn session state
+        self.current_turn += 1
+
         # 1. Extract current real-time hardware pressure
         pressure = self.telemetry.get_pressure()
 
@@ -286,7 +291,8 @@ class EvapoContextDaemon:
             query,
             top_k=top_k,
             hybrid_weight=hybrid_weight,
-            system_pressure=pressure
+            system_pressure=pressure,
+            current_turn=self.current_turn
         )
 
         # 3. Score and prune chunks using the re-ranking engine

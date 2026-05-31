@@ -134,8 +134,8 @@ class QAChaosController:
                     ])
                     corrupt_id += 1
                 except Exception as e:
-                sys.stderr.write(f"[QA Exception] Database write failed safely: {e}\n")
-                time.sleep(0.05)
+                    sys.stderr.write(f"[QA Exception] Database write failed safely: {e}\n")
+                    time.sleep(0.05)
 
         t1 = threading.Thread(target=pressure_wiggler, name="TelemetryWiggler", daemon=True)
         t2 = threading.Thread(target=database_corrupter, name="DatabaseCorrupter", daemon=True)
@@ -240,7 +240,7 @@ def run_qa_chaos_suite():
                 
                 # Check formatting
                 for idx, c in enumerate(candidates):
-                c["rank"] = idx + 1
+                    c["rank"] = idx + 1
                     
                 optimized = engine.optimize_context(
                     chunks=candidates,

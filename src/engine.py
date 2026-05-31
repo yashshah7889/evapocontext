@@ -32,7 +32,8 @@ class DynamicContextReRanker:
         decay_mode: str = "log",
         token_weight: float = 1.0,
         soft_pin_multiplier: float = 2.0,
-        budget_sorting_mode: str = "force"
+        budget_sorting_mode: str = "force",
+        threshold_ratio: float = 0.80
     ):
         """
         Initializes the engine with configurable coefficients.
@@ -42,22 +43,12 @@ class DynamicContextReRanker:
                             survive when system pressure is 0% (optimal conditions).
             pressure_factor: Controls how aggressively the threshold increases as 
                              system pressure rises (quadratic scaling).
-            default_normalization: Determines how token count affects the retention weight of a chunk:
-                                   - "log_multiply": Larger chunks are treated as heavier
-                                     (higher retention) and survive longer.
-                                   - "log_divide": Larger chunks are penalized (treated as
-                                     costly to keep) and pruned faster.
-                                   - "constant": Token count has no impact on weight calculation.
-            decay_mode: Temporal decay curve to apply:
-                        - "inverse_square": 1 / r^2 (legacy)
-                        - "inverse": 1 / r
-                        - "sqrt": 1 / sqrt(r)
-                        - "log": 1 / log2(r + 1) (default, gentle)
+            default_normalization: Determines how token count affects the retention weight of a chunk.
+            decay_mode: Temporal decay curve to apply.
             token_weight: Scaling exponent or factor to adjust the influence of token size.
             soft_pin_multiplier: Multiplier applied to the retention score of soft-pinned chunks.
-            budget_sorting_mode: Default sorting mode for context budgeting:
-                                 - "force": Prioritize absolute highest retention chunks.
-                                 - "efficiency": Prioritize high relevance per token (retention_score/tokens).
+            budget_sorting_mode: Default sorting mode for context budgeting.
+            threshold_ratio: Dynamic capping ratio for relevance-capped threshold adaptation.
         """
         self.base_threshold = base_threshold
         self.pressure_factor = pressure_factor
@@ -66,41 +57,38 @@ class DynamicContextReRanker:
         self.token_weight = token_weight
         self.soft_pin_multiplier = soft_pin_multiplier
         self.budget_sorting_mode = budget_sorting_mode
+        self.threshold_ratio = threshold_ratio
         logger.info(
             f"Initialized DynamicContextReRanker (Base Threshold: {self.base_threshold}, "
             f"Pressure Factor: {self.pressure_factor}, Normalization: {self.default_normalization}, "
             f"Decay Mode: {self.decay_mode}, Token Weight: {self.token_weight}, "
             f"Soft Pin Multiplier: {self.soft_pin_multiplier}, "
-            f"Budget Sorting Mode: {self.budget_sorting_mode})"
+            f"Budget Sorting Mode: {self.budget_sorting_mode}, "
+            f"Threshold Ratio: {self.threshold_ratio})"
         )
 
-    def calculate_pruning_threshold(self, system_pressure: float) -> float:
+    def calculate_pruning_threshold(self, system_pressure: float, max_score: Optional[float] = None) -> float:
         """
         Calculates the dynamic threshold boundary that chunks must exceed to survive.
         
         The mathematical formula is:
-            Threshold_pruning = base_threshold + (system_pressure^2 * pressure_factor)
-            
-        Example calculation:
-            1. Idle System (pressure = 0.0):
-               Threshold = 0.20 + (0.0^2 * 0.55) = 0.20
-               -> Chunks only need a score of 0.20 to survive.
-               
-            2. High Stress System (pressure = 0.8 / 80% RAM full):
-               Threshold = 0.20 + (0.64 * 0.55) = 0.20 + 0.352 = 0.552
-               -> Chunks now need a much higher score (0.552) to stay in memory.
-               
-            3. Critical System (pressure = 1.0 / 100% RAM full):
-               Threshold = 0.20 + (1.0^2 * 0.55) = 0.75
-               -> Chunks must score >= 0.75. Almost all non-pinned chunks will be pruned.
+            Telemetry_Threshold = base_threshold + (system_pressure^2 * pressure_factor)
+            Threshold_Cap = max(base_threshold, max_score * threshold_ratio)
+            Pruning_Threshold = min(Telemetry_Threshold, Threshold_Cap)
         """
         # Clamp pressure to [0.0, 1.0] in case raw metrics are slightly outside boundaries
         clamped_pressure = max(0.0, min(1.0, system_pressure))
         
-        # Compute threshold using quadratic scaling (squaring the pressure makes the reaction
-        # slow at first, then extremely sharp and aggressive when system stress gets critical)
-        threshold = self.base_threshold + (math.pow(clamped_pressure, 2) * self.pressure_factor)
+        # Compute telemetry-driven threshold using quadratic scaling
+        telemetry_threshold = self.base_threshold + (math.pow(clamped_pressure, 2) * self.pressure_factor)
         
+        if max_score is not None:
+            # Prevent context collapse when retrieved match quality is low
+            cap = max(self.base_threshold, max_score * self.threshold_ratio)
+            threshold = min(telemetry_threshold, cap)
+        else:
+            threshold = telemetry_threshold
+            
         # Round to 6 decimal places to ensure clean floating-point precision checks
         return round(threshold, 6)
 
@@ -110,24 +98,14 @@ class DynamicContextReRanker:
         token_count: int,
         rank: int,
         system_pressure: float = 0.0,
-        normalization_mode: Optional[str] = None
+        normalization_mode: Optional[str] = None,
+        turn_offset: Optional[int] = None
     ) -> float:
         """
         Calculates the retention score keeping a text chunk in memory.
         
         Formula:
-            Retention_Score = Relevance_Weight / decay(r)
-            
-        Step-by-Step Logic:
-            1. Enforce rank decay based on decay_mode:
-               - "inverse_square": divide by r^2 (legacy)
-               - "inverse": divide by r
-               - "sqrt": divide by sqrt(r)
-               - "log": divide by log2(r + 1) (default, gentle)
-            2. Apply relevance weight normalization with token_weight:
-               - "log_multiply": similarity * (1.0 + (ln(1 + tokens) / 10) * token_weight)
-               - "log_divide": similarity / ln(1 + tokens * token_weight)
-               - "constant": similarity (constant weight)
+            Retention_Score = Relevance_Weight / decay(age)
         """
         # Ensure rank (r) is 1-indexed to prevent division by zero or negative ranks
         r = float(max(1, rank))
@@ -154,17 +132,21 @@ class DynamicContextReRanker:
         else:
             raise ValueError(f"Unknown token normalization mode: {mode}")
 
+        # Choose age metric: Turn Offset takes precedence over Search Rank (r)
+        # Ensure age is >= 1 to prevent division issues
+        age = float(max(1, turn_offset)) if turn_offset is not None else r
+
         # Calculate decay factor based on configured decay_mode
         decay_mode = self.decay_mode
         if decay_mode == "inverse_square":
-            decay_factor = math.pow(r, 2)
+            decay_factor = math.pow(age, 2)
         elif decay_mode == "inverse":
-            decay_factor = r
+            decay_factor = age
         elif decay_mode == "sqrt":
-            decay_factor = math.sqrt(r)
+            decay_factor = math.sqrt(age)
         elif decay_mode == "log":
-            # Normalized log decay: log2(r + 1). At r=1, log2(2) = 1.0.
-            decay_factor = math.log2(r + 1)
+            # Normalized log decay: log2(age + 1). At age=1, log2(2) = 1.0.
+            decay_factor = math.log2(age + 1)
         else:
             raise ValueError(f"Unknown decay mode: {decay_mode}")
 
@@ -180,18 +162,11 @@ class DynamicContextReRanker:
         token_count: int,
         rank: int,
         system_pressure: float,
-        normalization_mode: Optional[str] = None
+        normalization_mode: Optional[str] = None,
+        turn_offset: Optional[int] = None
     ) -> float:
         """
         Calculates the retention score using raw numerical embedding vectors.
-        
-        Step-by-Step Logic:
-            1. Ensure the vectors are single-precision floats (float32) for speed and
-               consistency across Windows and macOS.
-            2. Compute the dot product: q . c
-            3. Compute the magnitudes (norms) of both vectors.
-            4. Compute Cosine Similarity: dot_product / (magnitude_q * magnitude_c)
-            5. Run the standard calculate_retention_score method using this similarity.
         """
         # Force single precision floats for cross-platform vector consistency
         q = np.array(query_vector, dtype=np.float32)
@@ -215,7 +190,8 @@ class DynamicContextReRanker:
             token_count=token_count,
             rank=rank,
             system_pressure=system_pressure,
-            normalization_mode=normalization_mode
+            normalization_mode=normalization_mode,
+            turn_offset=turn_offset
         )
 
     def optimize_context(
@@ -230,31 +206,20 @@ class DynamicContextReRanker:
         """
         Takes in a raw list of text chunks and returns only the ones that survive pruning.
         Optionally enforces a strict token budget.
-        
-        Step-by-Step Logic:
-            1. Calculate the pruning threshold based on system_pressure.
-            2. Loop through all chunks in the input list:
-               - Check the Pinning level:
-                 - "critical" (or is_pinned = True): Bypasses pruning.
-                 - "soft": Bypasses pruning, but score is scaled by soft_pin_multiplier.
-                 - "none" / regular: Evaluated against pruning threshold.
-               - Determine the temporal rank (r) of the chunk.
-               - Calculate the chunk's retention score using calculate_retention_score.
-               - If the score is higher than or equal to the pruning threshold (or pinned),
-                 the chunk survives!
-            3. Separate survivors into Critical vs. Non-Critical.
-            4. Sort the non-critical chunks according to budget_sorting_mode:
-               - "force": Sort by raw retention score descending (default).
-               - "efficiency": Sort by (retention score / tokens) descending to prioritize density.
-            5. Enforce token budget: Always retain all critical pinned chunks first. Log a warning if 
-               critical chunks exceed the budget, and fill the remaining space with the sorted chunks.
         """
         num_chunks = len(chunks)
-        pruning_threshold = self.calculate_pruning_threshold(system_pressure)
+        
+        # Calculate max similarity score across all candidate chunks for threshold adaptation
+        max_score = 0.0
+        if chunks:
+            max_score = max(float(c.get("similarity", c.get("score", 0.0))) for c in chunks)
+            
+        pruning_threshold = self.calculate_pruning_threshold(system_pressure, max_score=max_score)
         
         logger.debug(
             f"Optimizing context. Input chunks: {num_chunks} | "
             f"System Pressure: {system_pressure * 100:.1f}% | "
+            f"Max Score: {max_score:.4f} | "
             f"Pruning Threshold Required: {pruning_threshold:.4f} | "
             f"Token Budget: {token_budget} | "
             f"Budget Sorting Mode: {budget_sorting_mode or self.budget_sorting_mode}"
@@ -282,6 +247,7 @@ class DynamicContextReRanker:
             # Retrieve semantic metrics
             similarity = float(chunk.get("similarity", chunk.get("score", 0.0)))
             token_count = int(chunk.get("token_count", chunk.get("tokens", 100)))
+            turn_offset = chunk.get("turn_offset")
             
             # If critical pinned, it bypasses pruning entirely and gets infinite retention score
             if pinning_level == "critical":
@@ -299,7 +265,8 @@ class DynamicContextReRanker:
                 token_count=token_count,
                 rank=rank,
                 system_pressure=system_pressure,
-                normalization_mode=normalization_mode
+                normalization_mode=normalization_mode,
+                turn_offset=turn_offset
             )
             
             # If soft pinned, it bypasses pruning but gets scaled retention score
